@@ -60,7 +60,15 @@ def get_embedder(multires, i=0):
     
     embedder_obj = Embedder(**embed_kwargs)
     embed = lambda x, eo=embedder_obj : eo.embed(x)
-    return embed, embedder_obj.out_dim
+    out_dim = embedder_obj.out_dim
+    
+    # if i == 2:
+    #     embed = (embed, nn.Identity())
+    #     out_dim = (out_dim, 3)
+        
+    #     print(out_dim)
+        
+    return embed, out_dim
 
 
 # Model

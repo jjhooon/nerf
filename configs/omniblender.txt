@@ -1,0 +1,17 @@
+expname = archiviz_cylinder
+basedir = ./logs
+datadir = /root/dataset/shan/panorama_motion/archiviz_rot_only
+dataset_type = omniblender
+
+no_batching = False
+
+N_rand = 2048
+N_samples = 64
+N_importance = 128
+
+use_viewdirs = True
+
+testskip = 2
+
+raw_noise_std = 1e0
+perturb = 1.
