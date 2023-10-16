@@ -29,7 +29,7 @@ class Embedder:
         N_freqs = self.kwargs['num_freqs']
         
         if self.kwargs['log_sampling']:
-            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)   
         else:
             freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
             
@@ -41,11 +41,24 @@ class Embedder:
         self.embed_fns = embed_fns
         self.out_dim = out_dim
         
-    def embed(self, inputs):
-        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
+    def embed(self, inputs, plane_masks=None):
+        if plane_masks is not None:
+            for i, fn in enumerate(self.embed_fns):
+                freq_level_pts = torch.zeros_like(inputs)
+                if i == 0:
+                    output = fn(inputs)
+                    
+                else:
+                    high_freq_pts = inputs[~plane_masks.bool()]
+                    freq_level_pts[~plane_masks.bool()] = high_freq_pts
+                    output = torch.cat([output, fn(freq_level_pts)], -1)
+                    
+            return output
+        else:
+            return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 
-def get_embedder(multires, i=0):
+def get_embedder(multires, i=0, adaptive_pe=False):
     if i == -1:
         return nn.Identity(), 3
     
@@ -56,10 +69,15 @@ def get_embedder(multires, i=0):
                 'num_freqs' : multires,
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
+                'adaptive_pe' : adaptive_pe,
     }
     
     embedder_obj = Embedder(**embed_kwargs)
-    embed = lambda x, eo=embedder_obj : eo.embed(x)
+    if adaptive_pe:
+        embed = lambda x, plane_masks, eo=embedder_obj : eo.embed(x, plane_masks)
+    else:
+        embed = lambda x, eo=embedder_obj : eo.embed(x)
+        
     return embed, embedder_obj.out_dim
 
 
