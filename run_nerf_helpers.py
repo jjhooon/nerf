@@ -63,11 +63,19 @@ class Embedder:
                     output = fn(inputs)
                 else:
                     dist_mask = dists <= dist_thresholds[(i-1) // 2]
- 
-                    freq_level_pts = torch.zeros_like(inputs)
-                    freq_pts = inputs[dist_mask]
-                    freq_level_pts[dist_mask] = freq_pts
-                    output = torch.cat([output, fn(freq_level_pts)], -1)
+                    
+                    if fn.__defaults__[0] == torch.sin:
+                        freq_level_pts = torch.zeros_like(inputs)
+                        freq_pts = inputs[dist_mask]
+                        freq_level_pts[dist_mask] = freq_pts
+                        output = torch.cat([output, fn(freq_level_pts)], -1)
+                    else:
+                        freq_level_pts = torch.ones_like(inputs) * torch.pi/2 # due to torch.cos(0) = 1
+                        freq_pts = inputs[dist_mask]
+                        freq_level_pts[dist_mask] = freq_pts
+                        cos_output = fn(freq_level_pts)
+                        cos_output[~dist_mask] = 0
+                        output = torch.cat([output, cos_output], -1)
                     
             return output 
             

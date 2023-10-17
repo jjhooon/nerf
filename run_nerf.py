@@ -193,7 +193,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, gt_dep
         if i==0:
             print(rgb.shape, depth.shape)
 
-        if gt_imgs is not None and render_factor==0:
+        if (gt_imgs is not None) and (gt_depths is not None) and (render_factor==0):
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             print("PSNR : ", p)
             PSNR += p
