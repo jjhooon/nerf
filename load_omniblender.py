@@ -133,6 +133,7 @@ def load_omni_data(basedir, half_res=False, testskip=20):
     imgs = []
     depths = []
     plane_masks = []
+    dists = []
     poses = []
     
     with open(os.path.join(basedir, 'transforms.json'), 'r') as fp:
@@ -142,11 +143,13 @@ def load_omni_data(basedir, half_res=False, testskip=20):
         fname = os.path.join(basedir, 'images', frame['file_path']) + '.png'
         dname = os.path.join(basedir, 'depths/depth_npy', frame['file_path']) + '.npy'
         pname = os.path.join(basedir, 'plane_masks', frame['file_path']) + '.png'
+        ename = os.path.join(basedir, 'dists', frame['file_path']) + '.png'
         try:
             imgs.append(imageio.imread(fname))
             depths.append(np.load(dname, allow_pickle=True))
             poses.append(np.array(frame['transform_matrix']))
             plane_masks.append(imageio.imread(pname))
+            dists.append(imageio.imread(ename))
         except Exception as e:
             continue
 
@@ -161,11 +164,13 @@ def load_omni_data(basedir, half_res=False, testskip=20):
         fname = os.path.join(extrap_base, 'images', frame['file_path']) + '.png'
         dname = os.path.join(extrap_base, 'depths', frame['file_path']) + '.npy'
         pname = os.path.join(extrap_base, 'plane_masks', frame['file_path']) + '.png'
+        ename = os.path.join(extrap_base, 'dists', frame['file_path']) + '.png'
         try:
             imgs.append(imageio.imread(fname))
             depths.append(np.load(dname, allow_pickle=True))            
             poses.append(np.array(frame['transform_matrix']))
             plane_masks.append(imageio.imread(pname))
+            dists.append(imageio.imread(ename))
         except Exception as e:
             continue
 
@@ -173,6 +178,7 @@ def load_omni_data(basedir, half_res=False, testskip=20):
     plane_masks = np.array(plane_masks) / 255.
     depths = np.array(depths)
     poses = np.array(poses).astype(np.float32)
+    dists = np.array(dists) / 255.
 
     i_val = np.arange(0, train_num, testskip)
     i_train = np.array([i for i in range(train_num) if i not in i_val])                                                                                                                                          
@@ -216,4 +222,4 @@ def load_omni_data(basedir, half_res=False, testskip=20):
     #     cy = cy/2.
     #     imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
 
-    return imgs, depths, plane_masks, poses, render_poses, [H, W, focal], i_split, cx, cy, sph_center
+    return imgs, depths, plane_masks, dists, poses, render_poses, [H, W, focal], i_split, cx, cy, sph_center

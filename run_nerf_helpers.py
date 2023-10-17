@@ -29,7 +29,7 @@ class Embedder:
         N_freqs = self.kwargs['num_freqs']
         
         if self.kwargs['log_sampling']:
-            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)   
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
         else:
             freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
             
@@ -41,7 +41,7 @@ class Embedder:
         self.embed_fns = embed_fns
         self.out_dim = out_dim
         
-    def embed(self, inputs, plane_masks=None):
+    def embed(self, inputs, plane_masks=None, dists=None):
         if plane_masks is not None:
             for i, fn in enumerate(self.embed_fns):
                 freq_level_pts = torch.zeros_like(inputs)
@@ -52,13 +52,30 @@ class Embedder:
                     high_freq_pts = inputs[~plane_masks.bool()]
                     freq_level_pts[~plane_masks.bool()] = high_freq_pts
                     output = torch.cat([output, fn(freq_level_pts)], -1)
-                    
+        
             return output
+        
+        elif dists is not None:
+            dist_thresholds = list(range(1, self.kwargs['num_freqs']+1))[::-1] # [10, 9, ..., 1]
+
+            for i, fn in enumerate(self.embed_fns):
+                if i == 0:
+                    output = fn(inputs)
+                else:
+                    dist_mask = dists <= dist_thresholds[(i-1) // 2]
+ 
+                    freq_level_pts = torch.zeros_like(inputs)
+                    freq_pts = inputs[dist_mask]
+                    freq_level_pts[dist_mask] = freq_pts
+                    output = torch.cat([output, fn(freq_level_pts)], -1)
+                    
+            return output 
+            
         else:
             return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 
-def get_embedder(multires, i=0, adaptive_pe=False):
+def get_embedder(multires, i=0, adaptive_pe=False, distance_aware_pe=False):
     if i == -1:
         return nn.Identity(), 3
     
@@ -70,11 +87,14 @@ def get_embedder(multires, i=0, adaptive_pe=False):
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
                 'adaptive_pe' : adaptive_pe,
+                'distance_aware_pe' : distance_aware_pe,
     }
     
     embedder_obj = Embedder(**embed_kwargs)
     if adaptive_pe:
-        embed = lambda x, plane_masks, eo=embedder_obj : eo.embed(x, plane_masks)
+        embed = lambda x, plane_masks, eo=embedder_obj : eo.embed(x, plane_masks=plane_masks)
+    elif distance_aware_pe:
+        embed = lambda x, dists, eo=embedder_obj : eo.embed(x, dists=dists)
     else:
         embed = lambda x, eo=embedder_obj : eo.embed(x)
         

@@ -36,12 +36,14 @@ def batchify(fn, chunk):
     return ret
 
 
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, plane_masks=None, netchunk=1024*64):
+def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, plane_masks=None, dists=None, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     if plane_masks is not None:
         embedded = embed_fn(inputs_flat, plane_masks)
+    elif dists is not None:
+        embedded = embed_fn(inputs_flat, dists)
     else:
         embedded = embed_fn(inputs_flat)
 
@@ -50,6 +52,9 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, plane_masks=None, 
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         if plane_masks is not None:
             embedded_dirs = embeddirs_fn(input_dirs_flat, plane_masks)
+            embedded = torch.cat([embedded, embedded_dirs], -1)
+        elif dists is not None:
+            embedded_dirs = embeddirs_fn(input_dirs_flat, dists)
             embedded = torch.cat([embedded, embedded_dirs], -1)
         else:
             embedded_dirs = embeddirs_fn(input_dirs_flat)
@@ -60,13 +65,15 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, plane_masks=None, 
     return outputs
 
 
-def batchify_rays(rays_flat, chunk=1024*32, plane_masks=None, **kwargs):
+def batchify_rays(rays_flat, chunk=1024*32, plane_masks=None, dists=None, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
         if plane_masks is not None:
             ret = render_rays(rays_flat[i:i+chunk], plane_masks=plane_masks[i:i+chunk], **kwargs)
+        elif dists is not None:
+            ret = render_rays(rays_flat[i:i+chunk], dists=dists[i:i+chunk], **kwargs)
         else:
             ret = render_rays(rays_flat[i:i+chunk], **kwargs)
         for k in ret:
@@ -78,7 +85,7 @@ def batchify_rays(rays_flat, chunk=1024*32, plane_masks=None, **kwargs):
     return all_ret
 
 
-def render(H, W, K, chunk=1024*32, rays=None, c2w=None, plane_masks=None, ndc=True,
+def render(H, W, K, chunk=1024*32, rays=None, c2w=None, plane_masks=None, dists=None, ndc=True,
                   near=0., far=1.,
                   use_viewdirs=False, c2w_staticcam=None,
                   **kwargs):
@@ -138,6 +145,9 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, plane_masks=None, ndc=Tr
     if plane_masks is not None:
         plane_masks = torch.reshape(plane_masks, [-1,1])
         all_ret = batchify_rays(rays, chunk, plane_masks, **kwargs)
+    elif dists is not None:
+        dists = torch.reshape(dists, [-1,1])
+        all_ret = batchify_rays(rays, chunk, dists, **kwargs)
     else:
         all_ret = batchify_rays(rays, chunk, **kwargs)
         
@@ -145,13 +155,13 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, plane_masks=None, ndc=Tr
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
-    k_extract = ['rgb_map', 'disp_map', 'acc_map']
+    k_extract = ['rgb_map', 'depth_map', 'acc_map']
     ret_list = [all_ret[k] for k in k_extract]
     ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0, plane_masks=None):
+def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, gt_depths=None, savedir=None, render_factor=0, plane_masks=None, dists = None):
 
     H, W, focal = hwf
 
@@ -162,48 +172,67 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         focal = focal/render_factor
 
     rgbs = []
-    disps = []
+    depths = []
+    
+    PSNR = 0
+    RMSE = 0
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
         if plane_masks is not None:
-            rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], plane_masks=plane_masks[i], **render_kwargs)
+            rgb, depth, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], plane_masks=plane_masks[i], **render_kwargs)
+        elif dists is not None:
+            rgb, depth, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], dists=dists[i], **render_kwargs)
         else:
-            rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+            rgb, depth, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
-        disps.append(disp.cpu().numpy())
+        depths.append(depth.cpu().numpy())
+        
         if i==0:
-            print(rgb.shape, disp.shape)
+            print(rgb.shape, depth.shape)
 
-        """
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            print(p)
-        """
+            print("PSNR : ", p)
+            PSNR += p
+            
+            mask = gt_depths[i] < 6.5
+            rmse = np.sqrt(np.mean(np.square(depth.cpu().numpy()[mask] - gt_depths[i][mask])))            
+            print("RMSE : ", rmse)
+            RMSE += rmse
 
         if savedir is not None:
             rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+            
+            depth8 = depths[-1]
+            depth_filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            depth_npy = os.path.join(savedir, 'depth_{:03d}.npy'.format(i))
+            np.save(depth_npy, depth8)
+            imageio.imwrite(depth_filename, depth8)
 
 
     rgbs = np.stack(rgbs, 0)
-    disps = np.stack(disps, 0)
+    depths = np.stack(depths, 0)
+    
+    print("AVG PSNR : %0.3f" %(PSNR / len(render_poses)))
+    print("AVG RMSE : %0.3f" %(RMSE / len(render_poses)))
 
-    return rgbs, disps
+    return rgbs, depths
 
 
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
-    embed_fn, input_ch = get_embedder(args.multires, args.i_embed, args.adaptive_pe)
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed, args.adaptive_pe, args.distance_aware_pe)
 
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
-        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed, args.adaptive_pe)
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed, args.adaptive_pe, args.distance_aware_pe)
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
     model = NeRF(D=args.netdepth, W=args.netwidth,
@@ -223,6 +252,11 @@ def create_nerf(args):
                                                                     embed_fn=embed_fn,
                                                                     embeddirs_fn=embeddirs_fn,
                                                                     netchunk=args.netchunk)
+    elif args.distance_aware_pe:
+        network_query_fn = lambda inputs, viewdirs, network_fn, dists : run_network(inputs, viewdirs, network_fn, dists=dists,
+                                                                embed_fn=embed_fn,
+                                                                embeddirs_fn=embeddirs_fn,
+                                                                netchunk=args.netchunk)      
     else:
         network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                     embed_fn=embed_fn,
@@ -336,6 +370,7 @@ def render_rays(ray_batch,
                 network_query_fn,
                 N_samples,
                 plane_masks = None,
+                dists=None,
                 retraw=False,
                 lindisp=False,
                 perturb=0.,
@@ -406,20 +441,27 @@ def render_rays(ray_batch,
         z_vals = lower + (upper - lower) * t_rand
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
-    mask = plane_masks.clone()
     
 #     raw = run_network(pts)
     if plane_masks is not None:
+        mask = plane_masks.clone()
         plane_masks = mask.repeat(1, N_samples).flatten() # reshape for indexing
         raw = network_query_fn(pts, viewdirs, network_fn, plane_masks)
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        
+    elif dists is not None:
+        dist_mask = dists.clone()
+        dists = dist_mask.repeat(1, N_samples).flatten()
+        raw = network_query_fn(pts, viewdirs, network_fn, dists)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)      
+          
     else:
         raw = network_query_fn(pts, viewdirs, network_fn)
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
         
     if N_importance > 0:
 
-        rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
+        rgb_map_0, depth_map_0, acc_map_0 = rgb_map, depth_map, acc_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
@@ -433,17 +475,22 @@ def render_rays(ray_batch,
         if plane_masks is not None:
             plane_masks = mask.repeat(1, N_samples+N_importance).flatten()
             raw = network_query_fn(pts, viewdirs, run_fn, plane_masks)
+            
+        elif dists is not None:
+            dists = dist_mask.repeat(1, N_samples+N_importance).flatten()
+            raw = network_query_fn(pts, viewdirs, run_fn, dists)
+            
         else:
             raw = network_query_fn(pts, viewdirs, run_fn)
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
+    ret = {'rgb_map' : rgb_map, 'depth_map' : depth_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
         ret['rgb0'] = rgb_map_0
-        ret['disp0'] = disp_map_0
+        ret['depth0'] = depth_map_0
         ret['acc0'] = acc_map_0
         ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
@@ -498,6 +545,8 @@ def config_parser():
                         help='low-frequency mapping on planar regions using loaded plane mask (Change input space)')
     parser.add_argument("--adaptive_pe", action='store_true',
                         help='Adaptive positional embedding (Not change input space)')
+    parser.add_argument("--distance_aware_pe", action='store_true',
+                        help='Adaptive positional embedding guided by 2D distance map')
 
     # rendering options
     parser.add_argument("--N_samples", type=int, default=64, 
@@ -647,12 +696,41 @@ def train():
         
     elif args.dataset_type == 'omniblender':
         
-        images, depths, plane_masks, poses, render_poses, hwf, i_split, cx, cy, sph_center = load_omni_data(args.datadir, args.half_res, args.testskip)
+        images, depths, plane_masks, dists, poses, render_poses, hwf, i_split, cx, cy, sph_center = load_omni_data(args.datadir, args.half_res, args.testskip)
         print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split[0], [], i_split[2]
         args.sph_center = sph_center
         near, far = 1., 6.5
         render_plane_masks = plane_masks[i_test]
+        
+        if args.distance_aware_pe:
+            
+            # freq bands
+            freq_bands = 2.**np.linspace(0., args.multires-1, num=args.multires)
+            scaled_freq_bands = freq_bands / np.max(freq_bands)
+            scaled_freq_bands = np.insert(scaled_freq_bands, 0, 0)
+            
+            # distance clipping
+            ranges = []
+            clip_values = []
+            idx = 0
+
+            while True:
+                ranges.append((scaled_freq_bands[idx], scaled_freq_bands[idx+1]))
+                clip_values.append(idx+1)
+                idx += 1
+                
+                if idx == len(scaled_freq_bands) - 1:
+                    break
+                
+            # clip scaled_dist_map
+            clip_dist_map = np.zeros_like(dists)
+
+            for i, (lower, upper) in enumerate(ranges):
+                clip_dist_map[(dists>=lower) & (dists < upper)] = clip_values[i]
+                
+            dists = clip_dist_map
+            render_dists = dists[i_test]
 
         if images.shape[-1] == 4:
             if args.white_bkgd:
@@ -713,7 +791,10 @@ def train():
 
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-    render_plane_masks = torch.Tensor(render_plane_masks).to(device)
+    if args.adaptive_pe:
+        render_plane_masks = torch.Tensor(render_plane_masks).to(device)
+    elif args.distance_aware_pe:
+        render_dists = torch.Tensor(render_dists).to(device)
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -732,17 +813,23 @@ def train():
             print('test poses shape', render_poses.shape)
 
             if args.adaptive_pe:
-                rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor, plane_masks=render_plane_masks)
+                rgbs, _= render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, gt_depths=depths, savedir=testsavedir, render_factor=args.render_factor, plane_masks=render_plane_masks)
+            elif args.distance_aware_pe:
+                rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, gt_depths=depths, savedir=testsavedir, render_factor=args.render_factor, dists=render_dists)
             else:
-                rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+                rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, gt_depths=depths, savedir=testsavedir, render_factor=args.render_factor)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
 
-    # Reshape plane mask
-    plane_masks = np.stack([plane_masks, plane_masks, plane_masks], axis=3) #(N,800,800) => (N,800,800,3)
-    plane_masks = plane_masks[..., None, :] #(N,800,800,3)=> (N,800,800,1,3)
+    # Reshape variable for making batch
+    if args.adaptive_pe:
+        plane_masks = np.stack([plane_masks, plane_masks, plane_masks], axis=3) #(N,800,800) => (N,800,800,3)
+        plane_masks = plane_masks[..., None, :] #(N,800,800,3)=> (N,800,800,1,3)
+    elif args.distance_aware_pe:
+        dists = np.stack([dists, dists, dists], axis=3)
+        dists = dists[..., None, :]
 
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
@@ -755,8 +842,14 @@ def train():
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
-        rays_rgb = np.concatenate([rays_rgb, plane_masks[i_train]], 3)
-        rays_rgb = np.reshape(rays_rgb, [-1,4,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        if args.adaptive_pe:
+            rays_rgb = np.concatenate([rays_rgb, plane_masks[i_train]], 3)
+            rays_rgb = np.reshape(rays_rgb, [-1,4,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        elif args.distance_aware_pe:
+            rays_rgb = np.concatenate([rays_rgb, dists[i_train]], 3)
+            rays_rgb = np.reshape(rays_rgb, [-1,4,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
+        else:
+            rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb, 3]
         rays_rgb = rays_rgb.astype(np.float32)
         print('shuffle rays')
         np.random.shuffle(rays_rgb)
@@ -790,8 +883,15 @@ def train():
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s, batch_plane_mask = batch[:2], batch[2], batch[3]
-            batch_plane_mask = torch.mean(batch_plane_mask, dim=-1)
+            if args.adaptive_pe:
+                batch_rays, target_s, batch_plane_mask = batch[:2], batch[2], batch[3]
+                batch_plane_mask = torch.mean(batch_plane_mask, dim=-1)
+                
+            elif args.distance_aware_pe:
+                batch_rays, target_s, batch_dist_mask = batch[:2], batch[2], batch[3]
+                batch_dist_mask = torch.mean(batch_dist_mask, dim=-1)        
+            else:
+                batch_rays, target_s = batch[:2], batch[2]            
 
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
@@ -832,9 +932,18 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays, plane_masks=batch_plane_mask,
-                                                verbose=i < 10, retraw=True,
-                                                **render_kwargs_train)
+        if args.adaptive_pe:
+            rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays, plane_masks=batch_plane_mask,
+                                                    verbose=i < 10, retraw=True,
+                                                    **render_kwargs_train)
+        elif args.distance_aware_pe:
+            rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays, dists = batch_dist_mask,
+                                                    verbose=i < 10, retraw=True,
+                                                    **render_kwargs_train)
+        else:
+            rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                    verbose=i < 10, retraw=True,
+                                                    **render_kwargs_train)                        
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
@@ -877,7 +986,12 @@ def train():
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, plane_masks=render_plane_masks)
+                if args.adaptive_pe:
+                    rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, plane_masks=render_plane_masks)
+                elif args.distance_aware_pe:
+                    rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, dists=render_dists)
+                else:
+                    rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
@@ -895,7 +1009,12 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, plane_masks=render_plane_masks)
+                if args.adaptive_pe:
+                    render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, plane_masks=render_plane_masks)
+                elif args.distance_aware_pe:
+                    render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, dists=render_dists)
+                else:
+                    render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
 
 
